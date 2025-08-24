@@ -1,5 +1,8 @@
 import time
 import pandas as pd
+import datetime
+import pyperclip
+from selenium.webdriver.common.keys import Keys
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
@@ -57,6 +60,7 @@ if fila.empty:
 else:
     row = fila.iloc[0]
     identificacion = row['Identificacion']
+    fecha_salida = row['Fecha de Salida'] if 'Fecha de Salida' in row else ''
     remuneracion = row['Remuneracion']
     causa = row['Causa']
     mes = row['Mes']
@@ -66,6 +70,9 @@ else:
     horas_suplementarias = row['Horas_suplementarias']
     horas_extraordinarias = row['Horas_extraordinarias']
     horas_nocturnas = row['Horas_nocturnas']
+    cumplimiento_laboral = row['Cumplimiento_laboral']
+    comision_por_responsabilidad = row['Comision_por_responsabilidad']
+    total_rem_pendiente = row['Total_remuneracion_pendiente']
     fondo_reserva = row['Fondo de reserva'].strip().lower()
     valor_fr = row['Valor FR']
     xiii = row['XIII'].strip().lower()
@@ -73,7 +80,7 @@ else:
     obs_xiii = row['Obs XIII'] if 'Obs XIII' in row else ''
 
     # --- Pasos críticos con reintento ---
-    MAX_INTENTOS = 3
+    MAX_INTENTOS = 5
     for intento in range(MAX_INTENTOS):
         try:
             # Seleccionar "Identificación"
@@ -282,13 +289,9 @@ else:
             driver.execute_script("arguments[0].checked = true; arguments[0].dispatchEvent(new Event('change'));", radio_no)
             print("✅ Fondo de Reserva: No aplica")
 
+
     # --- Décima Tercera ---
-    def procesar_xiii(driver, xiii, fecha_xiii, obs_xiii):
-        import datetime
-        import pandas as pd
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
+    def procesar_xiii(driver, xiii, fecha_xiii, obs_xiii, total_rem_pendiente):
 
         def formatear_fecha_xiii(fecha):
             if pd.isna(fecha) or fecha == "":
@@ -321,6 +324,7 @@ else:
         """)
 
         if xiii_flag:
+            # Esperar que la tabla de Décima Tercera cargue
             WebDriverWait(driver, 10).until(
                 lambda d: len(d.find_element(By.ID, "frmLegal:dgrDCR0003").find_elements(By.CSS_SELECTOR, "*")) > 0
             )
@@ -367,47 +371,67 @@ else:
             if obs_xiii:
                 safe_send_keys(driver, "frmLegal:j_idt626", obs_xiii)
                 print(f"✅ Observación Décima Tercera: {obs_xiii}")
-
-            # --- Nuevo bloque: registrar salario pendiente en Agosto 2025 ---
+                
+        # --- Registrar Total Remuneración pendiente en Agosto 2025 ---
+        if total_rem_pendiente and str(total_rem_pendiente).strip() not in ["", "0", "0.0"]:
             try:
-                # Tomar el salario pendiente de la fila 0
-                salario_input = WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.ID, "frmLegal:dttRemu001:0:txtFilaRE0001"))
-                )
-                # Limpiar USD y espacios
-                salario_pendiente = salario_input.get_attribute("value").replace("USD", "").strip()
-
-                # Presionar el botón para habilitar el campo de Agosto 2025
+                # Presionar botón para habilitar campo
                 boton_agregar = WebDriverWait(driver, 10).until(
                     EC.element_to_be_clickable((By.ID, "frmLegal:j_idt1053"))
                 )
                 boton_agregar.click()
-                print("✅ Botón 'Registrar Ingreso' presionado para habilitar Agosto 2025")
+                print("✅ Botón 'Registrar Ingreso' presionado para habilitar el campo")
 
-                # Ingresar el valor en Agosto 2025
-                agosto_input = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.ID, "frmLegal:txtSueldo20257"))
+                # Esperar panel listo
+                WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.ID, "frmLegal:pnlIngreso0003"))
                 )
-                agosto_input.clear()
-                agosto_input.send_keys(salario_pendiente)
 
-                # Disparar evento onchange de PrimeFaces
-                driver.execute_script("""
-                    var input = document.getElementById('frmLegal:txtSueldo20257');
-                    input.dispatchEvent(new Event('change', { bubbles: true }));
-                """)
+                intentos = 5
+                for i in range(intentos):
+                    # Pegar valor vía JS
+                    driver.execute_script("""
+                        var input = document.getElementById('frmLegal:txtSueldo20257');
+                        input.value = arguments[0];
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                        if (typeof PrimeFaces !== 'undefined') {
+                            PrimeFaces.ab({
+                                s: input.id,
+                                e: 'change',
+                                f: 'frmLegal',
+                                p: input.id,
+                                u: 'frmLegal:pnlIngreso0003',
+                                ps: true
+                            });
+                        }
+                    """, str(total_rem_pendiente))
 
-                print(f"✅ Salario pendiente registrado en Agosto 2025: {salario_pendiente}")
+                    # Esperar 0.5s para que el cálculo ocurra
+                    time.sleep(0.5)
+
+                    # Verificar si el campo calculado ya cambió
+                    valor_calculado = driver.execute_script(
+                        "return document.getElementById('frmLegal:txtSueldoDecimo00001').value;"
+                    )
+                    if valor_calculado != "0" and valor_calculado.strip() != "":
+                        print(f"✅ Total Remuneración Pendiente registrada y calculada: {valor_calculado}")
+                        break
+                    else:
+                        print(f"⚠️ Intento {i+1}/{intentos}: campo calculado aún en 0, reintentando...")
+                else:
+                    print("❌ No se pudo registrar Total Remuneración Pendiente después de varios intentos")
+
             except Exception as e:
-                print(f"❌ Error registrando salario pendiente en Agosto 2025: {e}")
-                
-    # --- Uso dentro del flujo principal ---
-    agregar_remuneracion(driver, salario_pendiente, mes, anio, sueldo_nominal,
-                        horas_suplementarias, horas_extraordinarias, horas_nocturnas)
+                print(f"❌ Error registrando salario pendiente desde Excel: {e}")
+ 
+     # --- Uso dentro del flujo principal ---
+    #agregar_remuneracion(driver, salario_pendiente, mes, anio, sueldo_nominal,
+                        #horas_suplementarias, horas_extraordinarias, horas_nocturnas)       
 
     procesar_fondo_reserva(driver, fondo_reserva, valor_fr)
 
-    procesar_xiii(driver, xiii, fecha_xiii, obs_xiii)
+    procesar_xiii(driver, xiii, fecha_xiii, obs_xiii, total_rem_pendiente)
 
     # --- Marcar fila como enviada ---
     df_datos.at[fila.index[0], 'Enviado'] = "Sí"
